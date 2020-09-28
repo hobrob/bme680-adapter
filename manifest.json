@@ -1,6 +1,6 @@
 {
-  "author": "Matthieu Corageoud",
-  "description": "BME280/BMP280 sensor adapter for Mozilla WebThings Gateway",
+  "author": "Robert Price",
+  "description": "BME680 sensor adapter for Mozilla WebThings Gateway",
   "gateway_specific_settings": {
     "webthings": {
       "exec": "{nodeLoader} {path}",
@@ -9,21 +9,20 @@
       "strict_min_version": "0.10.0"
     }
   },
-  "homepage_url": "https://github.com/matco/bmp280-adapter",
-  "id": "bmp280-adapter",
+  "homepage_url": "https://github.com/hobrob/bme680-adapter",
+  "id": "bme680-adapter",
   "license": "Unlicense",
   "manifest_version": 1,
-  "name": "BME280/BMP280",
+  "name": "BME680",
   "options": {
     "default": {
       "scanInterval": 10,
       "sensors": [
         {
-          "title": "bmp280 1",
-          "description": "BMP280 n\u00b01",
+          "title": "bme680 1",
+          "description": "BME680 n\u00b01",
           "i2cBusNo": 0,
-          "i2cAddress": "0x76",
-          "isBME280": false
+          "i2cAddress": "0x76"
         }
       ]
     },
@@ -65,10 +64,6 @@
               "i2cAddress": {
                 "type": "string",
                 "description": "I\u00b2C address for the sensor (hexadecimal 0xFF)"
-              },
-              "isBME280": {
-                "type": "boolean",
-                "description": "Whether or not the sensor is a BME280, which also includes humidity readings"
               }
             }
           }
@@ -76,6 +71,6 @@
       }
     }
   },
-  "short_name": "BMP280",
+  "short_name": "BME680",
   "version": "0.1.1"
 }

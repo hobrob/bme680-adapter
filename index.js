@@ -1,1 +1,1 @@
-module.exports = require('./bmp280-adapter');
+module.exports = require('./bme680-adapter');
