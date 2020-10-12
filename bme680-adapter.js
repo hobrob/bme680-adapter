@@ -1,3 +1,4 @@
+
 const util = require('util');
 const {
 	Adapter,
@@ -5,12 +6,12 @@ const {
 	Device,
 	Property,
 } = require('gateway-addon');
-const BME680 = require('bme680-sensor');
+const { Bme680 } = require('bme680-sensor');
 const manifest = require('./manifest.json');
-
 const DEFAULT_OPTIONS = {
 	i2cBusNo: 0,
-	i2cAddress: BME680.BME680_DEFAULT_I2C_ADDRESS() //defaults to 0x77
+	i2cAddress: 0x76,
+	scanInterval: 10
 };
 
 class BME680Device extends Device {
@@ -19,9 +20,10 @@ class BME680Device extends Device {
 		super(adapter, id);
 		this.title = deviceDescription.title;
 		this.description = deviceDescription.description;
+		this.enableVOC = deviceDescription.enableVOC;
 		this['@type'] = ['TemperatureSensor'];
 
-		//describe temperature
+		// describe temperature
 		const temperatureProperty = new Property(
 			this,
 			'temperature',
@@ -37,7 +39,7 @@ class BME680Device extends Device {
 		);
 		this.properties.set('temperature', temperatureProperty);
 
-		//describe pressure
+		// describe pressure
 		const pressureProperty = new Property(
 			this,
 			'pressure',
@@ -52,7 +54,7 @@ class BME680Device extends Device {
 		);
 		this.properties.set('pressure', pressureProperty);
 
-		//describe humidity
+		// describe humidity
 		const humidityProperty = new Property(
 			this,
 			'humidity',
@@ -68,8 +70,29 @@ class BME680Device extends Device {
 		);
 		this.properties.set('humidity', humidityProperty);
 
+		// if enabled, describe air quality and decouple sampling interval from UI refresh interval
+		if (this.enableVOC) {
+			const airQualityProperty = new Property(
+				this,
+				'airquality',
+				{
+					type: 'number',
+					title: 'Indoor Air Quality',
+					unit: 'percent',
+					minimum: 0,
+					maximum: 100,
+					description: 'VOC air quality index in percent',
+					readOnly: true,
+				}
+			);
+			this.properties.set('airquality', airQualityProperty);
+			this.scanIntervalIn = 1;
+			this.scanIntervalOut = Math.floor(deviceDescription.scanInterval);
+		} else {
+			this.scanIntervalIn = Math.floor(deviceDescription.scanInterval);
+		}
+
 		//create underlying sensor
-		this.scanInterval = deviceDescription.scanInterval * 1000;
 		this.sensorConfig = Object.assign({}, DEFAULT_OPTIONS);
 		if(deviceDescription['i2cBusNo']) {
 			this.sensorConfig.i2cBusNo = parseInt(deviceDescription['i2cBusNo']);
@@ -77,46 +100,140 @@ class BME680Device extends Device {
 		if(deviceDescription['i2cAddress']) {
 			this.sensorConfig.i2cAddress = parseInt(deviceDescription['i2cAddress']);
 		}
-		this.sensor = new BME680(this.sensorConfig);
+		this.sensor = new Bme680(this.sensorConfig.i2cBusNo, this.sensorConfig.i2cAddress);
 		console.log('Link with sensor setup successfully', this.sensorConfig);
+
+		// configure VOC sensor with some arbitrary parameters
+		this.sensor.setHumidityOversample(2);
+		this.sensor.setPressureOversample(2);
+		this.sensor.setTemperatureOversample(2);
+		this.sensor.setFilter(2);
+		this.sensor.setGasStatus(1);
+
 	}
 
 	readSensorData() {
 		if(!this.busy) {
 			this.busy = true;
-			this.sensor.getSensorData().then(data => {
+			this.sensor.getSensorData().then(snapshot => {
 				this.busy = false;
+				if (snapshot) {
 
-				//update temperature, do not call setCachedValueAndNotify because device must be notified even if the value does not change
-				const temperature = this.temperature;
-				temperature.setCachedValue(data.temperature_C);
-				this.notifyPropertyChanged(temperature);
-				
-				//update pressure
-				const pressure = this.pressure;
-				pressure.setCachedValue(data.pressure_hPa);
-				this.notifyPropertyChanged(pressure);
-				
-				//update humidity
-				const humidity = this.humidity;
-				humidity.setCachedValue(data.humidity);
-				this.notifyPropertyChanged(humidity);
-				
+					// update air quality
+					if (this.enableVOC) {
+						var iaq;
+						if (snapshot.data.heat_stable) {
+							this.scanCounter++;
+							if (iaq = this.burnInAirQuality(snapshot)) {
+								this.iaqCumulative += iaq;
+								if (this.scanCounter % this.scanIntervalOut === 0) {
+									const airquality = this.properties.get('airquality');
+									airquality.setCachedValue(this.iaqCumulative/this.scanIntervalOut);
+									this.notifyPropertyChanged(airquality);
+									this.iaqCumulative = 0;
+								}
+							}
+						}
+					}
+					
+					if ((this.enableVOC && this.scanCounter % this.scanIntervalOut === 0) || !this.enableVOC) {
+
+						// update temperature
+						const temperature = this.properties.get('temperature');
+						temperature.setCachedValue(snapshot.data.temperature);
+						this.notifyPropertyChanged(temperature);
+
+						// update pressure
+						const pressure = this.properties.get('pressure');
+						pressure.setCachedValue(snapshot.data.pressure);
+						this.notifyPropertyChanged(pressure);
+
+						// update humidity
+						const humidity = this.properties.get('humidity');
+						humidity.setCachedValue(snapshot.data.humidity);
+						this.notifyPropertyChanged(humidity);
+
+					}
+
+                }
 			}).catch(error => {
 				console.log(`Unable to read sensor data: ${error}`);
 			});
 		}
 	}
 
+	burnInAirQuality(snapshot) {
+		if (this.scanCounter > 300) {
+			if (!this.baseline.gasBurnt) {
+				this.baseline.gas = this.baseline.gas / this.burnCounter;
+				this.baseline.gasBurnt = true;
+				this.burnInAirQuality = this.calcAirQuality;
+				console.log('VOC sensor burn-in complete, sampling air quality at 1 second intervals, refreshing display at '+this.scanIntervalOut+' second intervals');
+			}
+			return this.calcAirQuality(snapshot);
+		} else if (this.scanCounter > 250) {
+			this.burnCounter++;
+			this.baseline.gas += snapshot.data.gas_resistance;
+		}
+		return false;
+	}
+
+	calcAirQuality(snapshot) {
+		var gas, gasOffset, gasScore, hum, humOffset, humScore, airScore;
+
+		gas = snapshot.data.gas_resistance;
+		gasOffset = this.baseline.gas - gas;
+		hum = snapshot.data.humidity;
+		humOffset = hum - this.baseline.hum;
+
+		// calculate humidity score as distance from humidity baseline
+		if (humOffset > 0) {
+			humScore = (100 - this.baseline.hum - humOffset);
+			humScore = humScore / (100 - this.baseline.hum);
+			humScore = humScore * (this.baseline.humWeight * 100);
+		} else {
+			humScore = (this.baseline.hum + humOffset);
+			humScore = humScore / this.baseline.hum;
+			humScore = humScore * (this.baseline.humWeight * 100);
+		}
+
+		// calculate gas score as distance from gas baseline
+		if (gasOffset > 0) {
+			gasScore = (gas / this.baseline.gas);
+			gasScore = gasScore * (100 - (this.baseline.humWeight * 100));
+		} else {
+			gasScore = 100 - (this.baseline.humWeight * 100);
+		}
+		airScore = humScore + gasScore;
+		return airScore;
+	}
+
 	start() {
+		this.reset();
+		if (this.enableVOC) {
+			console.log('Sampling temperature, pressure and humidity at '+this.scanIntervalOut+' second intervals');
+			console.log('VOC sensor burn-in commencing, this will take 5 minutes');
+		} else {
+			console.log('Sampling temperature, pressure and humidity at '+this.scanIntervalIn+' second intervals');
+			console.log('VOC sensor disabled');
+		}
 		return this.sensor.initialize().then(() => {
-			this.interval = setInterval(this.readSensorData.bind(this), this.scanInterval);
+			this.interval = setInterval(this.readSensorData.bind(this), this.scanIntervalIn * 1000);
 		});
 	}
 
 	stop() {
 		clearInterval(this.interval);
+		this.reset();
 	}
+
+	reset() {
+		this.scanCounter = 0;
+		this.burnCounter = 0;
+		this.iaqCumulative = 0;
+		this.baseline = { gas: 0, gasBurnt: false, hum: 40, humWeight: 0.25 };
+	}
+
 }
 
 class BME680Adapter extends Adapter {
@@ -169,3 +286,4 @@ module.exports = function (addonManager) {
 		});
 	}).catch(console.error);
 };
+
